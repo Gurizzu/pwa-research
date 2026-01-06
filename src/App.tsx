@@ -4,8 +4,9 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Separator } from "@/components/ui/separator"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
-import { Clock, Calendar, Share2, Bookmark, ArrowLeft, Loader2, Heart } from "lucide-react"
+import { Clock, Calendar, Share2, Bookmark, ArrowLeft, Loader2, Heart, Wifi, WifiOff } from "lucide-react"
 import { getInteraction, saveInteraction } from "@/lib/db"
+import { useOnlineStatus } from "@/hooks/use-online-status"
 
 interface Post {
   id: number
@@ -37,8 +38,16 @@ function App() {
   const [relatedPosts, setRelatedPosts] = useState<Post[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Interaction State
   const [isLiked, setIsLiked] = useState(false)
   const [isBookmarked, setIsBookmarked] = useState(false)
+
+  // Simulation State
+  const isOnline = useOnlineStatus()
+  const [serverLikes, setServerLikes] = useState(0) // Simulated Server State
+  const [localLikes, setLocalLikes] = useState(0)   // Client Optimistic State
+  const [pendingSync, setPendingSync] = useState(false)
 
   // Stable ID: Always fetch ID 1 as the main article
   const MAIN_POST_ID = 1
@@ -47,29 +56,41 @@ function App() {
     setLoading(true)
     setError(null)
     try {
-      // Fetch Main Post
-      const response = await fetch(`https://dummyjson.com/posts/${MAIN_POST_ID}`)
+      // Fetch from local JSON
+      const response = await fetch('/data/post.json')
       if (!response.ok) throw new Error("Failed to fetch post")
-      const data = await response.json()
-      setPost(data)
+      const allPosts: Post[] = await response.json()
 
-      // Fetch interactions from IndexedDB
+      const mainPost = allPosts.find(p => p.id === MAIN_POST_ID)
+      if (!mainPost) throw new Error("Post not found")
+
+      setPost(mainPost)
+      setServerLikes(mainPost.reactions.likes)
+
+      // Initialize Local State
       const interaction = await getInteraction(MAIN_POST_ID.toString())
       if (interaction) {
         setIsLiked(interaction.liked)
         setIsBookmarked(interaction.bookmarked)
+        // If user liked it locally, local count = server + 1
+        const calculatedLocal = mainPost.reactions.likes + (interaction.liked ? 1 : 0)
+        setLocalLikes(calculatedLocal)
+
+        // Check if there's a mismatch (pending sync from before refresh)
+        if (calculatedLocal !== mainPost.reactions.likes) {
+          console.log("[Sync] Detected pending sync after page load")
+          setPendingSync(true)
+        }
       } else {
         setIsLiked(false)
         setIsBookmarked(false)
+        setLocalLikes(mainPost.reactions.likes)
       }
 
       // Fetch Related Posts (IDs 2, 3, 4)
       const relatedIds = [2, 3, 4]
-      const relatedPromises = relatedIds.map(id =>
-        fetch(`https://dummyjson.com/posts/${id}`).then(res => res.json())
-      )
-      const relatedData = await Promise.all(relatedPromises)
-      setRelatedPosts(relatedData)
+      const related = allPosts.filter(p => relatedIds.includes(p.id))
+      setRelatedPosts(related)
 
     } catch (err: any) {
       console.error("Failed to load content", err)
@@ -79,10 +100,33 @@ function App() {
     }
   }
 
+  // Effect: Simulate Server Sync when Online
+  useEffect(() => {
+    if (isOnline && pendingSync) {
+      // Simulate network delay
+      const timer = setTimeout(() => {
+        setServerLikes(localLikes)
+        setPendingSync(false)
+      }, 1000)
+      return () => clearTimeout(timer)
+    }
+  }, [isOnline, pendingSync, localLikes])
+
+  // Initial Load
+  useEffect(() => {
+    fetchPost()
+  }, [])
+
   const toggleLike = async () => {
     if (!post) return
     const newState = !isLiked
     setIsLiked(newState)
+
+    // Update local count optimistically (base + 1 if liked)
+    const computedLocal = post.reactions.likes + (newState ? 1 : 0)
+    setLocalLikes(computedLocal)
+    setPendingSync(true)
+
     await saveInteraction(post.id.toString(), { liked: newState, bookmarked: isBookmarked })
   }
 
@@ -97,10 +141,6 @@ function App() {
     const imgId = IMAGE_MAP[id] || IMAGE_MAP[1]
     return `https://images.unsplash.com/photo-${imgId}?w=800&auto=format&fit=crop&q=80`
   }
-
-  useEffect(() => {
-    fetchPost()
-  }, [])
 
   if (loading) {
     return (
@@ -120,7 +160,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-50 font-sans transition-colors duration-300 pb-20">
+    <div className="min-h-screen bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-50 font-sans transition-colors duration-300 pb-20 relative">
 
       {/* Header */}
       <header className="sticky top-0 z-50 w-full border-b border-neutral-200 dark:border-neutral-800 bg-white/80 dark:bg-neutral-950/80 backdrop-blur-md">
@@ -218,7 +258,11 @@ function App() {
                 className={`gap-2 ${isLiked ? "bg-red-500 hover:bg-red-600 text-white border-red-500" : ""}`}
               >
                 <Heart className={`h-4 w-4 ${isLiked ? "fill-current" : ""}`} />
-                {isLiked ? "Liked" : "Like"}
+                {isLiked ?
+                  <span className="flex items-center gap-1">Liked <span className="text-xs opacity-80">({localLikes})</span></span>
+                  :
+                  <span className="flex items-center gap-1">Like <span className="text-xs opacity-80">({localLikes})</span></span>
+                }
               </Button>
             </div>
           </div>
@@ -257,6 +301,38 @@ function App() {
         </section>
 
       </main>
+
+      {/* Floating Debug Card - Server Simulation */}
+      <div className="fixed bottom-24 right-4 z-50 animate-in slide-in-from-bottom-5 fade-in duration-300">
+        <Card className="w-64 shadow-2xl border-neutral-200 dark:border-neutral-800 bg-white/95 dark:bg-neutral-900/95 backdrop-blur">
+          <CardHeader className="p-4 pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-bold uppercase tracking-wider text-neutral-500">Sync Simulation</CardTitle>
+              {isOnline ?
+                <Badge className="bg-green-500 hover:bg-green-600 gap-1"><Wifi className="h-3 w-3" /> Online</Badge> :
+                <Badge variant="destructive" className="gap-1"><WifiOff className="h-3 w-3" /> Offline</Badge>
+              }
+            </div>
+          </CardHeader>
+          <CardContent className="p-4 pt-2 space-y-3">
+            <div className="flex justify-between items-center text-sm">
+              <span className="text-neutral-500">Like (Local)</span>
+              <span className="font-mono font-bold">{localLikes}</span>
+            </div>
+            <div className="flex justify-between items-center text-sm">
+              <span className="text-neutral-500">Like (Server)</span>
+              <span className={`font-mono font-bold transition-all duration-300 ${pendingSync && isOnline ? "" : pendingSync ? "text-red-500" : "text-green-500"}`}>
+                {serverLikes}
+              </span>
+            </div>
+            {pendingSync && (
+              <div className="text-xs text-center text-amber-500 font-medium animate-pulse mt-2">
+                {isOnline ? "Syncing..." : "Waiting for connection..."}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
 
       {/* Footer */}
       <footer className="border-t border-neutral-200 dark:border-neutral-800 mt-12 bg-white dark:bg-neutral-950 px-6">
