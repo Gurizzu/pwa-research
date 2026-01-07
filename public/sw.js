@@ -1,5 +1,5 @@
 const CACHE_NAME = "pwa-article-v3";
-const URLS_TO_CACHE = [
+const ASSETS_TO_CACHE = [
     "/",
     "/index.html",
     "/vite.svg",
@@ -11,7 +11,7 @@ self.addEventListener("install", (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME).then((cache) => {
             console.log("Opened cache");
-            return cache.addAll(URLS_TO_CACHE);
+            return cache.addAll(ASSETS_TO_CACHE);
         })
     );
     self.skipWaiting(); // Activate worker immediately

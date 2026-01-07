@@ -1,0 +1,25 @@
+{
+    "name": "pwa-research-backend",
+    "version": "1.0.0",
+    "description": "Backend API for PWA Research Book Store",
+    "main": "src/server.js",
+    "type": "module",
+    "scripts": {
+        "start": "node src/server.js",
+        "dev": "node --watch src/server.js",
+        "seed": "node src/seed.js"
+    },
+    "keywords": [
+        "pwa",
+        "mongodb",
+        "express"
+    ],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "cors": "^2.8.5",
+        "dotenv": "^17.2.3",
+        "express": "^4.18.2",
+        "mongodb": "^6.3.0"
+    }
+}

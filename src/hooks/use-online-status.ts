@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 
-export function useOnlineStatus(interval = 5000) {
+export function useOnlineStatus(interval = 2000) {
     const [isOnline, setIsOnline] = useState(navigator.onLine)
 
     useEffect(() => {
@@ -18,7 +18,7 @@ export function useOnlineStatus(interval = 5000) {
 
             // If browser says online, verify with actual network request to external server
             try {
-                await fetch("https://dummyjson.com/posts/1", {
+                await fetch("https://jsonplaceholder.typicode.com/posts", {
                     method: "HEAD",
                     cache: "no-store",
                 })
