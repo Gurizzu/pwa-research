@@ -2,7 +2,10 @@ import 'dotenv/config';
 import { MongoClient } from 'mongodb';
 
 const uri = process.env.MONGODB_URI;
-const client = new MongoClient(uri);
+const client = new MongoClient(uri, {
+    serverSelectionTimeoutMS: 2000, // Fail fast after 2 seconds
+    connectTimeoutMS: 2000,
+});
 
 let db = null;
 
@@ -14,17 +17,23 @@ export async function connectDB() {
         return db;
     } catch (error) {
         console.error('❌ MongoDB connection error:', error);
-        process.exit(1);
+        // Don't exit process, allow server to run and return errors to client
+        // process.exit(1); 
+        db = null;
     }
 }
 
 export function getDB() {
     if (!db) {
-        throw new Error('Database not initialized. Call connectDB first.');
+        throw new Error('Database connection lost or not initialized.');
     }
     return db;
 }
 
 export async function closeDB() {
     await client.close();
+}
+
+export function isConnected() {
+    return !!db;
 }

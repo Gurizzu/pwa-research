@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { connectDB, getDB } from './db.js';
+import { connectDB, getDB, isConnected } from './db.js';
 
 const app = express();
 const PORT = 3001;
@@ -8,6 +8,16 @@ const PORT = 3001;
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// DB Connection Check Middleware
+app.use((req, res, next) => {
+    if (!isConnected()) {
+        // Try to reconnect? Or just fail fast.
+        // Failing fast allows the frontend to immediately switch to offline mode.
+        return res.status(503).json({ error: 'Database unavailable' });
+    }
+    next();
+});
 
 // Initialize DB
 await connectDB();
@@ -41,10 +51,22 @@ app.get('/api/cart', async (req, res) => {
     }
 });
 
-// Add item to cart
+// Add item to cart (with idempotency support for offline sync)
+// Uses atomic upsert to prevent race condition duplicates
 app.post('/api/cart', async (req, res) => {
     try {
         const { bookId, quantity = 1 } = req.body;
+        // Idempotency key can come from header (SW sync) or body (direct call)
+        const idempotencyKey = req.headers['x-idempotency-key'] || req.body.idempotencyKey;
+
+        // If idempotency key provided, check if this exact request was already processed
+        if (idempotencyKey) {
+            const existingByKey = await getDB().collection('cart').findOne({ idempotencyKey });
+            if (existingByKey) {
+                console.log(`[Idempotency] Duplicate request detected: ${idempotencyKey}`);
+                return res.json(existingByKey); // Return existing, don't duplicate
+            }
+        }
 
         // Check if book exists
         const book = await getDB().collection('books').findOne({ _id: bookId });
@@ -52,32 +74,33 @@ app.post('/api/cart', async (req, res) => {
             return res.status(404).json({ error: 'Book not found' });
         }
 
-        // Check if already in cart
-        const existingItem = await getDB().collection('cart').findOne({ bookId });
+        // Use atomic findOneAndUpdate with upsert to prevent race condition duplicates
+        // Using $max for quantity so if multiple syncs happen, we keep the highest value
+        // (client sends total quantity, not delta)
+        const result = await getDB().collection('cart').findOneAndUpdate(
+            { bookId }, // filter by bookId
+            {
+                $max: { quantity: quantity }, // Keep the higher quantity
+                $setOnInsert: {
+                    _id: generateId('cart'),
+                    bookId,
+                    bookTitle: book.title,
+                    bookPrice: book.price,
+                    bookImage: book.imageUrl,
+                    addedAt: new Date(),
+                    ...(idempotencyKey && { idempotencyKey })
+                }
+            },
+            {
+                upsert: true,
+                returnDocument: 'after' // Return the updated/inserted document
+            }
+        );
 
-        if (existingItem) {
-            // Update quantity
-            const result = await getDB().collection('cart').updateOne(
-                { bookId },
-                { $inc: { quantity: quantity } }
-            );
-            const updated = await getDB().collection('cart').findOne({ bookId });
-            res.json(updated);
-        } else {
-            // Add new item with string ID
-            const cartItem = {
-                _id: generateId('cart'),
-                bookId,
-                bookTitle: book.title,
-                bookPrice: book.price,
-                bookImage: book.imageUrl,
-                quantity,
-                addedAt: new Date()
-            };
-            await getDB().collection('cart').insertOne(cartItem);
-            res.status(201).json(cartItem);
-        }
+        console.log(`[Cart] ${result.lastErrorObject?.updatedExisting ? 'Updated' : 'Created'} item for bookId: ${bookId}`);
+        res.status(result.lastErrorObject?.updatedExisting ? 200 : 201).json(result.value);
     } catch (error) {
+        console.error('[Cart] Error:', error);
         res.status(500).json({ error: error.message });
     }
 });

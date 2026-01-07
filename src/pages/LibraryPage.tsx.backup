@@ -5,16 +5,6 @@ import { ArrowLeft, ShoppingCart, Plus, Minus, Trash2, Loader2, CheckCircle } fr
 import { useNavigate } from 'react-router-dom'
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
-import {
-    initDB,
-    cacheBooks,
-    getCachedBooks,
-    setLocalCart,
-    getLocalCart,
-    addToSyncQueue,
-    getSyncQueue,
-    removeSyncItem
-} from '../lib/db'
 
 const API_URL = 'http://localhost:3001/api'
 
@@ -46,351 +36,61 @@ function LibraryPage() {
     const [cartOpen, setCartOpen] = useState(false)
     const [checkoutSuccess, setCheckoutSuccess] = useState(false)
 
-    // Fetch books & Cart with Sync logic
+    // Fetch books
     useEffect(() => {
-        const init = async () => {
-            console.log('[DEBUG] init() - navigator.onLine:', navigator.onLine)
-
-            // CRITICAL: Load local cart from IDB FIRST before anything else
-            const localCart = await getLocalCart()
-            console.log('[DEBUG] init() - localCart from IDB:', localCart)
-            if (localCart && localCart.length > 0) {
-                console.log('[DEBUG] init() - Setting cart from IDB:', localCart.length, 'items')
-                setCart(localCart)
-            }
-
-            // Register Background Sync - let SW handle syncing to avoid race condition
-            if (navigator.onLine && 'serviceWorker' in navigator && 'SyncManager' in window) {
-                try {
-                    const registration = await navigator.serviceWorker.ready
-                    // @ts-ignore
-                    await registration.sync.register('sync-queue')
-                    console.log('[DEBUG] init() - Background Sync registered')
-                } catch (err) {
-                    console.log('[DEBUG] init() - Background Sync registration failed:', err)
-                }
-            }
-
-            // Fetch latest data (fetchCart will merge with local unsynced items)
-            fetchBooks()
-            fetchCart()
-        }
-        init()
-
-        // Sync listener for subsequent online events
-        const handleOnline = async () => {
-            console.log('[DEBUG] Back online! Triggering Background Sync...')
-            // Trigger Background Sync instead of UI-level sync to avoid race condition
-            if ('serviceWorker' in navigator && 'SyncManager' in window) {
-                try {
-                    const registration = await navigator.serviceWorker.ready
-                    // @ts-ignore
-                    await registration.sync.register('sync-queue')
-                } catch (err) {
-                    console.log('[DEBUG] Background Sync registration failed:', err)
-                }
-            }
-            // fetchCart will be called after SW notifies us via postMessage
-        }
-        window.addEventListener('online', handleOnline)
-
-        // Listen for Service Worker sync completion messages
-        const handleSWMessage = (event: MessageEvent) => {
-            if (event.data?.type === 'SYNC_COMPLETE') {
-                console.log(`[DEBUG] SW synced ${event.data.syncedCount} items, refreshing cart...`)
-                fetchCart()
-            }
-        }
-        navigator.serviceWorker?.addEventListener('message', handleSWMessage)
-
-        return () => {
-            window.removeEventListener('online', handleOnline)
-            navigator.serviceWorker?.removeEventListener('message', handleSWMessage)
-        }
+        fetchBooks()
+        fetchCart()
     }, [])
 
     const fetchBooks = async () => {
         try {
-            console.log('Fetching books...')
             const response = await fetch(`${API_URL}/books`)
-            if (!response.ok) throw new Error('Network error')
             const data = await response.json()
             setBooks(data)
-            await cacheBooks(data)
         } catch (error) {
             console.error('Error fetching books:', error)
-            const cached = await getCachedBooks()
-            if (cached && cached.length > 0) {
-                setBooks(cached)
-            }
-            console.log('Using cached books')
-            console.log(cached)
         } finally {
             setLoading(false)
         }
     }
 
     const fetchCart = async () => {
-        console.log('[DEBUG] fetchCart() - Starting, navigator.onLine:', navigator.onLine)
-
         try {
-            console.log('[DEBUG] fetchCart() - Attempting fetch...')
             const response = await fetch(`${API_URL}/cart`)
-            console.log('[DEBUG] fetchCart() - Response status:', response.status)
-            if (!response.ok) throw new Error('Network error')
-
-            // Server data
-            const serverData: CartItem[] = await response.json()
-            console.log('[DEBUG] fetchCart() - Server has', serverData.length, 'items')
-
-            // Get current local cart to check for items not yet synced
-            const localCart = await getLocalCart() || []
-            console.log('[DEBUG] fetchCart() - Local IDB has', localCart.length, 'items')
-
-            // Find local items with temp IDs that are NOT in server data
-            // These are items that were added locally but not yet synced
-            const localOnlyItems: CartItem[] = []
-            const allBooks = books.length > 0 ? books : (await getCachedBooks() || [])
-
-            for (const localItem of localCart) {
-                // If it's a temp item (not synced)
-                if (localItem._id && localItem._id.startsWith('temp-')) {
-                    // Check if this bookId exists in server data
-                    const existsOnServer = serverData.find(s => s.bookId === localItem.bookId)
-                    if (!existsOnServer) {
-                        console.log('[DEBUG] fetchCart() - Found unsynced local item:', localItem.bookId)
-                        localOnlyItems.push(localItem)
-
-                        // Also add to sync queue if not already there
-                        const queue = await getSyncQueue()
-                        const alreadyQueued = queue.find(q =>
-                            q.method === 'POST' &&
-                            q.url.endsWith('/cart') &&
-                            q.body?.bookId === localItem.bookId
-                        )
-                        if (!alreadyQueued) {
-                            console.log('[DEBUG] fetchCart() - Adding orphaned item to sync queue:', localItem.bookId)
-                            await addToSyncQueue({
-                                url: `${API_URL}/cart`,
-                                method: 'POST',
-                                body: { bookId: localItem.bookId, quantity: localItem.quantity }
-                            })
-                        }
-                    }
-                }
-            }
-
-            // Also check for pending adds in syncQueue (items that haven't been synced yet)
-            const queue = await getSyncQueue()
-            const pendingAdds = queue.filter(q => q.method === 'POST' && q.url.endsWith('/cart'))
-
-            for (const pending of pendingAdds) {
-                const bookId = pending.body.bookId
-                // Check if this bookId is already in serverData or localOnlyItems
-                const existsOnServer = serverData.find(i => i.bookId === bookId)
-                const existsInLocal = localOnlyItems.find(i => i.bookId === bookId)
-
-                if (!existsOnServer && !existsInLocal) {
-                    const book = allBooks.find(b => b._id === bookId)
-                    if (book) {
-                        localOnlyItems.push({
-                            _id: `temp-pending-${bookId}`,
-                            bookId: book._id,
-                            bookTitle: book.title,
-                            bookPrice: book.price,
-                            bookImage: book.imageUrl,
-                            quantity: pending.body.quantity || 1
-                        })
-                    }
-                }
-            }
-
-            // Merge: server data + local-only items (preserving unsynced items)
-            const mergedCart = [...serverData, ...localOnlyItems]
-            console.log('[DEBUG] fetchCart() - Merged cart:', mergedCart.length, 'items (server:', serverData.length, '+ local:', localOnlyItems.length, ')')
-
-            setCart(mergedCart)
-            await setLocalCart(mergedCart)
-
+            const data = await response.json()
+            setCart(data)
         } catch (error) {
-            console.log('[DEBUG] fetchCart() - OFFLINE/ERROR, loading from IDB')
             console.error('Error fetching cart:', error)
-            const cached = await getLocalCart()
-            console.log('[DEBUG] fetchCart() - Cached cart from IDB:', cached)
-            if (cached && cached.length > 0) {
-                console.log('[DEBUG] fetchCart() - Setting cart from cache:', cached.length, 'items')
-                setCart(cached)
-            } else {
-                console.log('[DEBUG] fetchCart() - No cached cart found!')
-            }
         }
     }
 
     const addToCart = async (bookId: string) => {
-        console.log('[DEBUG] addToCart() - bookId:', bookId)
-        const book = books.find(b => b._id === bookId)
-        if (!book) {
-            console.log('[DEBUG] addToCart() - Book not found!')
-            return
-        }
-
-        // Generate idempotency key to prevent duplicate submissions
-        const idempotencyKey = `add-${bookId}-${Date.now()}`
-
-        const existingItem = cart.find(item => item.bookId === bookId)
-        let newCart: CartItem[] = []
-        let isNewItem = false
-
-        if (existingItem) {
-            newCart = cart.map(item =>
-                item.bookId === bookId
-                    ? { ...item, quantity: item.quantity + 1 }
-                    : item
-            )
-            // If existing item is temp, update the pending queue entry
-            if (existingItem._id.startsWith('temp-')) {
-                const db = await initDB()
-                const queue = await getSyncQueue()
-                const queueItem = queue.find(q =>
-                    q.method === 'POST' &&
-                    q.url.endsWith('/cart') &&
-                    q.body.bookId === bookId
-                )
-                if (queueItem) {
-                    queueItem.body.quantity += 1
-                    await db.put('syncQueue', queueItem)
-                }
-            }
-        } else {
-            isNewItem = true
-            newCart = [...cart, {
-                _id: `temp-${bookId}`,  // Consistent temp ID using bookId
-                bookId: book._id,
-                bookTitle: book.title,
-                bookPrice: book.price,
-                bookImage: book.imageUrl,
-                quantity: 1
-            }]
-        }
-
-        // 1. Update UI immediately
-        console.log('[DEBUG] addToCart() - Setting new cart:', newCart.length, 'items')
-        setCart(newCart)
-
-        // 2. ALWAYS persist to IDB first (await it!)
-        console.log('[DEBUG] addToCart() - Persisting to IDB...')
-        await setLocalCart(newCart)
-        console.log('[DEBUG] addToCart() - IDB persist complete')
-
-        // Verify it was saved
-        const verify = await getLocalCart()
-        console.log('[DEBUG] addToCart() - Verified IDB cart:', verify?.length, 'items')
-
-        // 3. For new items: ALWAYS add to sync queue first (queue-first pattern)
-        let queueId: number | undefined
-        if (isNewItem) {
-            queueId = await addToSyncQueue({
-                url: `${API_URL}/cart`,
+        try {
+            await fetch(`${API_URL}/cart`, {
                 method: 'POST',
-                body: { bookId, quantity: 1, idempotencyKey }
-            }) as number
-        }
-
-        // 4. Attempt immediate sync if online
-        if (navigator.onLine) {
-            try {
-                const response = await fetch(`${API_URL}/cart`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ bookId, quantity: 1, idempotencyKey })
-                })
-
-                // IMPORTANT: Check if response is actually successful
-                if (response.ok) {
-                    console.log('[DEBUG] addToCart() - Server sync SUCCESS, removing from queue')
-                    // Success: remove from queue if we added it
-                    if (queueId !== undefined) {
-                        await removeSyncItem(queueId)
-                    }
-                    // Refresh to get real server IDs
-                    fetchCart()
-                } else {
-                    console.log('[DEBUG] addToCart() - Server returned error:', response.status, '- keeping in queue')
-                    // Server error (500, etc) - keep in sync queue for retry
-                }
-            } catch (error) {
-                console.log('[DEBUG] addToCart() - Network failed, action already queued for background sync')
-            }
-        } else {
-            console.log('[DEBUG] addToCart() - Offline, action queued for background sync')
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bookId, quantity: 1 })
+            })
+            fetchCart()
+        } catch (error) {
+            console.error('Error adding to cart:', error)
         }
     }
 
     const updateQuantity = async (cartItemId: string, quantity: number) => {
-        const itemToUpdate = cart.find(i => i._id === cartItemId)
-        if (!itemToUpdate) return
-
-        const newCart = cart.map(item =>
-            item._id === cartItemId
-                ? { ...item, quantity }
-                : item
-        )
-        setCart(newCart)
-        await setLocalCart(newCart)
-
-        if (cartItemId.startsWith('temp-')) {
-            const db = await initDB()
-            const queue = await getSyncQueue()
-            const queueItem = queue.find(q =>
-                q.method === 'POST' &&
-                q.url.endsWith('/cart') &&
-                q.body.bookId === itemToUpdate.bookId
-            )
-            if (queueItem) {
-                queueItem.body.quantity = quantity
-                await db.put('syncQueue', queueItem)
-            }
-            return
-        }
-
         try {
             await fetch(`${API_URL}/cart/${cartItemId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ quantity })
             })
+            fetchCart()
         } catch (error) {
             console.error('Error updating cart:', error)
-            await addToSyncQueue({
-                url: `${API_URL}/cart/${cartItemId}`,
-                method: 'PUT',
-                body: { quantity }
-            })
         }
     }
 
     const removeFromCart = async (cartItemId: string) => {
-        const itemToRemove = cart.find(i => i._id === cartItemId)
-        if (!itemToRemove) return
-
-        const newCart = cart.filter(item => item._id !== cartItemId)
-        setCart(newCart)
-        await setLocalCart(newCart)
-
-        if (cartItemId.startsWith('temp-')) {
-            const queue = await getSyncQueue()
-            const queueItem = queue.find(q =>
-                q.method === 'POST' &&
-                q.url.endsWith('/cart') &&
-                q.body.bookId === itemToRemove.bookId
-            )
-            if (queueItem) {
-                // @ts-ignore
-                await removeSyncItem(queueItem.id) // TS might complain about 'id' if not casted, but 'getSyncQueue' returns stored objects
-            }
-            return
-        }
-
         try {
             await fetch(`${API_URL}/cart/${cartItemId}`, {
                 method: 'DELETE'
@@ -398,10 +98,6 @@ function LibraryPage() {
             fetchCart()
         } catch (error) {
             console.error('Error removing from cart:', error)
-            await addToSyncQueue({
-                url: `${API_URL}/cart/${cartItemId}`,
-                method: 'DELETE'
-            })
         }
     }
 
@@ -412,7 +108,6 @@ function LibraryPage() {
             })
             if (response.ok) {
                 setCart([])
-                setLocalCart([])
                 setCheckoutSuccess(true)
                 setTimeout(() => {
                     setCheckoutSuccess(false)
@@ -421,22 +116,6 @@ function LibraryPage() {
             }
         } catch (error) {
             console.error('Error during checkout:', error)
-            // Offline checkout is tricky. 
-            // We could queue it, empty cart, and hope it succeeds?
-            // User requested offline cart support.
-            // Let's optimistic success + queue.
-            setCart([])
-            setLocalCart([])
-            setCheckoutSuccess(true)
-            setTimeout(() => {
-                setCheckoutSuccess(false)
-                setCartOpen(false)
-            }, 2000)
-
-            await addToSyncQueue({
-                url: `${API_URL}/checkout`,
-                method: 'POST'
-            })
         }
     }
 
