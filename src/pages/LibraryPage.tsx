@@ -353,18 +353,41 @@ function LibraryPage() {
             if (queueItem) {
                 queueItem.body.quantity = quantity
                 await db.put('syncQueue', queueItem)
+                console.log('[DEBUG] updateQuantity() - Updated queue entry, new quantity:', quantity)
             }
             return
         }
 
-        try {
-            await fetch(`${API_URL}/cart/${cartItemId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ quantity })
-            })
-        } catch (error) {
-            console.error('Error updating cart:', error)
+        // 3. SYNCED item - need to PUT to server
+        if (navigator.onLine) {
+            try {
+                const response = await fetch(`${API_URL}/cart/${cartItemId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ quantity })
+                })
+                if (response.ok) {
+                    console.log('[DEBUG] updateQuantity() - Server PUT success')
+                } else {
+                    // Server error - queue for retry
+                    console.log('[DEBUG] updateQuantity() - Server error, queuing PUT')
+                    await addToSyncQueue({
+                        url: `${API_URL}/cart/${cartItemId}`,
+                        method: 'PUT',
+                        body: { quantity }
+                    })
+                }
+            } catch (error) {
+                console.error('[DEBUG] updateQuantity() - Network error, queuing PUT')
+                await addToSyncQueue({
+                    url: `${API_URL}/cart/${cartItemId}`,
+                    method: 'PUT',
+                    body: { quantity }
+                })
+            }
+        } else {
+            // Offline - queue for later sync
+            console.log('[DEBUG] updateQuantity() - Offline, queuing PUT')
             await addToSyncQueue({
                 url: `${API_URL}/cart/${cartItemId}`,
                 method: 'PUT',
@@ -377,10 +400,12 @@ function LibraryPage() {
         const itemToRemove = cart.find(i => i._id === cartItemId)
         if (!itemToRemove) return
 
+        // 1. Update UI & IDB immediately
         const newCart = cart.filter(item => item._id !== cartItemId)
         setCart(newCart)
         await setLocalCart(newCart)
 
+        // 2. If TEMP item - just remove the pending ADD from queue
         if (cartItemId.startsWith('temp-')) {
             const queue = await getSyncQueue()
             const queueItem = queue.find(q =>
@@ -389,19 +414,39 @@ function LibraryPage() {
                 q.body.bookId === itemToRemove.bookId
             )
             if (queueItem) {
-                // @ts-ignore
-                await removeSyncItem(queueItem.id) // TS might complain about 'id' if not casted, but 'getSyncQueue' returns stored objects
+                await removeSyncItem(queueItem.id as number)
+                console.log('[DEBUG] removeFromCart() - Removed pending ADD from queue')
             }
             return
         }
 
-        try {
-            await fetch(`${API_URL}/cart/${cartItemId}`, {
-                method: 'DELETE'
-            })
-            fetchCart()
-        } catch (error) {
-            console.error('Error removing from cart:', error)
+        // 3. SYNCED item - need to DELETE from server
+        if (navigator.onLine) {
+            try {
+                const response = await fetch(`${API_URL}/cart/${cartItemId}`, {
+                    method: 'DELETE'
+                })
+                if (response.ok) {
+                    console.log('[DEBUG] removeFromCart() - Server DELETE success')
+                    fetchCart()
+                } else {
+                    // Server error - queue for retry
+                    console.log('[DEBUG] removeFromCart() - Server error, queuing DELETE')
+                    await addToSyncQueue({
+                        url: `${API_URL}/cart/${cartItemId}`,
+                        method: 'DELETE'
+                    })
+                }
+            } catch (error) {
+                console.error('[DEBUG] removeFromCart() - Network error, queuing DELETE')
+                await addToSyncQueue({
+                    url: `${API_URL}/cart/${cartItemId}`,
+                    method: 'DELETE'
+                })
+            }
+        } else {
+            // Offline - queue for later sync
+            console.log('[DEBUG] removeFromCart() - Offline, queuing DELETE')
             await addToSyncQueue({
                 url: `${API_URL}/cart/${cartItemId}`,
                 method: 'DELETE'
