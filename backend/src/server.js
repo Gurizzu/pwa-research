@@ -75,12 +75,18 @@ app.post('/api/cart', async (req, res) => {
         }
 
         // Use atomic findOneAndUpdate with upsert to prevent race condition duplicates
-        // Using $max for quantity so if multiple syncs happen, we keep the highest value
-        // (client sends total quantity, not delta)
+        // - Online single add: $inc to increment by quantity (usually 1)
+        // - Offline sync with useTotal=true: $set to set exact quantity
+        const useTotal = req.body.useTotal === true;
+
+        const updateOps = useTotal
+            ? { $set: { quantity: quantity } }  // Set exact quantity (for offline sync)
+            : { $inc: { quantity: quantity } }; // Increment (for online adds)
+
         const result = await getDB().collection('cart').findOneAndUpdate(
             { bookId }, // filter by bookId
             {
-                $max: { quantity: quantity }, // Keep the higher quantity
+                ...updateOps,
                 $setOnInsert: {
                     _id: generateId('cart'),
                     bookId,

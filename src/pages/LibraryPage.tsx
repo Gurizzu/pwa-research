@@ -234,20 +234,19 @@ function LibraryPage() {
             return
         }
 
-        // Generate idempotency key to prevent duplicate submissions
-        const idempotencyKey = `add-${bookId}-${Date.now()}`
-
         const existingItem = cart.find(item => item.bookId === bookId)
         let newCart: CartItem[] = []
-        let isNewItem = false
+        let isNewTempItem = false
 
         if (existingItem) {
+            // Item exists - increment quantity locally
             newCart = cart.map(item =>
                 item.bookId === bookId
                     ? { ...item, quantity: item.quantity + 1 }
                     : item
             )
-            // If existing item is temp, update the pending queue entry
+
+            // If existing item is TEMP (not yet synced), update the pending queue entry
             if (existingItem._id.startsWith('temp-')) {
                 const db = await initDB()
                 const queue = await getSyncQueue()
@@ -259,12 +258,15 @@ function LibraryPage() {
                 if (queueItem) {
                     queueItem.body.quantity += 1
                     await db.put('syncQueue', queueItem)
+                    console.log('[DEBUG] addToCart() - Updated queue entry, new quantity:', queueItem.body.quantity)
                 }
             }
+            // If existing item is already SYNCED (real server ID), we'll POST to server below
         } else {
-            isNewItem = true
+            // New item - create temp item
+            isNewTempItem = true
             newCart = [...cart, {
-                _id: `temp-${bookId}`,  // Consistent temp ID using bookId
+                _id: `temp-${bookId}`,
                 bookId: book._id,
                 bookTitle: book.title,
                 bookPrice: book.price,
@@ -277,53 +279,55 @@ function LibraryPage() {
         console.log('[DEBUG] addToCart() - Setting new cart:', newCart.length, 'items')
         setCart(newCart)
 
-        // 2. ALWAYS persist to IDB first (await it!)
-        console.log('[DEBUG] addToCart() - Persisting to IDB...')
+        // 2. ALWAYS persist to IDB
         await setLocalCart(newCart)
         console.log('[DEBUG] addToCart() - IDB persist complete')
 
-        // Verify it was saved
-        const verify = await getLocalCart()
-        console.log('[DEBUG] addToCart() - Verified IDB cart:', verify?.length, 'items')
-
-        // 3. For new items: ALWAYS add to sync queue first (queue-first pattern)
-        let queueId: number | undefined
-        if (isNewItem) {
-            queueId = await addToSyncQueue({
+        // 3. Handle sync based on item type
+        if (isNewTempItem) {
+            // NEW TEMP ITEM: Use queue-first pattern for offline support
+            const idempotencyKey = `add-${bookId}-${Date.now()}`
+            const queueId = await addToSyncQueue({
                 url: `${API_URL}/cart`,
                 method: 'POST',
                 body: { bookId, quantity: 1, idempotencyKey }
             }) as number
-        }
 
-        // 4. Attempt immediate sync if online
-        if (navigator.onLine) {
-            try {
-                const response = await fetch(`${API_URL}/cart`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ bookId, quantity: 1, idempotencyKey })
-                })
-
-                // IMPORTANT: Check if response is actually successful
-                if (response.ok) {
-                    console.log('[DEBUG] addToCart() - Server sync SUCCESS, removing from queue')
-                    // Success: remove from queue if we added it
-                    if (queueId !== undefined) {
+            if (navigator.onLine) {
+                try {
+                    const response = await fetch(`${API_URL}/cart`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ bookId, quantity: 1, idempotencyKey })
+                    })
+                    if (response.ok) {
                         await removeSyncItem(queueId)
+                        fetchCart() // Get real server ID
                     }
-                    // Refresh to get real server IDs
-                    fetchCart()
-                } else {
-                    console.log('[DEBUG] addToCart() - Server returned error:', response.status, '- keeping in queue')
-                    // Server error (500, etc) - keep in sync queue for retry
+                } catch (error) {
+                    console.log('[DEBUG] addToCart() - Network failed, queued for sync')
                 }
-            } catch (error) {
-                console.log('[DEBUG] addToCart() - Network failed, action already queued for background sync')
             }
-        } else {
-            console.log('[DEBUG] addToCart() - Offline, action queued for background sync')
+        } else if (existingItem && !existingItem._id.startsWith('temp-')) {
+            // EXISTING SYNCED ITEM: Direct POST to increment on server
+            if (navigator.onLine) {
+                try {
+                    console.log('[DEBUG] addToCart() - Incrementing synced item on server')
+                    const response = await fetch(`${API_URL}/cart`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ bookId, quantity: 1 }) // increment by 1
+                    })
+                    if (response.ok) {
+                        fetchCart() // Refresh cart with server data
+                    }
+                } catch (error) {
+                    console.log('[DEBUG] addToCart() - Network failed for synced item increment')
+                    // TODO: Could add to queue for retry
+                }
+            }
         }
+        // For existing TEMP items, we already updated the queue entry above
     }
 
     const updateQuantity = async (cartItemId: string, quantity: number) => {
